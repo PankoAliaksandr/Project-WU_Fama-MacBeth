@@ -1,0 +1,344 @@
+\documentclass{article}
+
+\title{Fama and MacBeth (1973) Project}
+\author{Panko, Yakimchyk, Agafonov, Kurennoi, Zaborskikh}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{mathtools}
+\usepackage[a4paper,margin=2cm, tmargin=3cm]{geometry}
+\usepackage{graphicx}
+\usepackage{latexsym}
+\usepackage{booktabs}
+\usepackage{dcolumn}
+\usepackage[round]{natbib}
+\usepackage{hyperref}
+\usepackage[utf8]{inputenc}
+
+\begin{document}
+%\SweaveOpts{concordance=TRUE}
+
+\maketitle
+
+<< echo=FALSE, warning = FALSE, message = FALSE, out.width = "0.8\\textwidth", out.height="0.8\\textwidth", fig.align='center'>>=
+# Libraries
+library(quantmod)
+library(PerformanceAnalytics)
+
+download_data = function(){
+  
+  # Download 20 german stocks and DAX data
+  german_stocks_data = read.csv(file = file.choose(), sep = ";" )
+  
+  # Download 3-month treasury bill data(in %)
+  rf_data = read.csv(file = file.choose(), sep = "," )
+  
+  # Convert Date to the right format
+  german_stocks_data$Date = as.Date(german_stocks_data$Date, "%d.%m.%Y")
+  rf_data$Date = as.Date(rf_data$Date, "%m/%d/%Y")
+  
+  # Convert percentage to value (monthly) 
+  rf_data$RF10Y = rf_data$RF10Y / 1200
+  
+  # Create return list
+  data = list("german_stocks_data" = german_stocks_data, "rf_data" = rf_data)
+  
+  return(data)
+}
+
+calculate_returns = function(german_stocks_data){
+  
+  # Calculate returns of 20 stocks and DAX (prices in data frame will be replaced by returns)
+  for (i in 2:ncol(german_stocks_data)) {
+    stock_price_xts = xts(x = german_stocks_data[,i], order.by = german_stocks_data$Date)
+    german_stocks_data[,i] = CalculateReturns(stock_price_xts)
+  }
+  
+  # Delete the first row with NA in returns
+  german_stocks_data = german_stocks_data[-1,]
+  rownames(german_stocks_data) = NULL
+  
+  return(german_stocks_data)
+}
+
+calculate_risk_premium = function(risk_premium_df, pricing_errors_df, model_significance_df, german_stocks_data_all, rf_data_all){
+  
+  stock_names = colnames(german_stocks_data_all)[2:21]
+  number_of_stocks = length(stock_names)
+  
+  for (line_number in 1:nrow(risk_premium_df)){
+  
+    start_period = risk_premium_df[line_number, "Period Start"]
+    end_period = risk_premium_df[line_number, "Period End"]
+    
+    # Create a subframe based on a time period
+    german_stocks_data = german_stocks_data_all[german_stocks_data_all$Date >= start_period &
+                                                german_stocks_data_all$Date <= end_period, ]
+    
+    rf_data = rf_data_all[rf_data_all$Date >= start_period &
+                            rf_data_all$Date <= end_period, ]
+    
+    # Estimate the time series regression to find betas
+    number_of_significant_intercepts = 0
+    number_of_significant_slopes = 0
+    betas = c()
+    ncolumns =  ncol(german_stocks_data)
+    for (i in 2:(ncolumns - 1)) {
+      
+      time_series_lm = lm( I(german_stocks_data[,i] - rf_data$RF10Y) ~
+                           I(german_stocks_data[,ncolumns] - rf_data$RF10Y))
+      
+      beta = time_series_lm$coefficients[[2]]
+      betas = c(betas, beta)
+      
+      # Find p-values of coefficients
+      time_series_lm_summary = summary(time_series_lm)
+      intercept_p_value = time_series_lm_summary$coefficients[1,"Pr(>|t|)"] 
+      slope_p_value = time_series_lm_summary$coefficients[2,"Pr(>|t|)"] 
+
+      if (intercept_p_value <= 0.05){
+        number_of_significant_intercepts = number_of_significant_intercepts + 1
+      }
+      
+      if (slope_p_value <= 0.05){
+        number_of_significant_slopes = number_of_significant_slopes + 1
+      }
+ 
+    }
+    
+    # Save betas for the whole period
+    if (line_number == 1){
+      whole_period_betas = betas
+      names(whole_period_betas) = stock_names
+    }
+
+    # Evaluate significance of the models
+    model_significance_df[line_number, "Percentage of significant intercepts in time series regressions (5% level)"] = number_of_significant_intercepts * 100.0 / number_of_stocks
+    model_significance_df[line_number, "Percentage of significant slopes in time series regressions (5% level)"] = number_of_significant_slopes * 100.0 / number_of_stocks
+    
+    # Estimate the cross sectional regression to find gammas(realized risk premia)
+    number_of_significant_slopes = 0
+    gammas = c()
+    model_residuals = c()
+    nrows = nrow(german_stocks_data)
+    for (i in 1:nrows) {
+      excess_return = t(german_stocks_data[i, 2:(ncolumns - 1)]) - rf_data$RF10Y[i]
+      cross_sectional_lm = lm( excess_return ~ betas + 0)
+      gamma = cross_sectional_lm$coefficients[[1]]
+      gammas = c(gammas, gamma)
+      model_residuals = c(model_residuals, cross_sectional_lm$residuals)
+      
+      # Find slope p-value
+      cross_sectional_lm_summary = summary(cross_sectional_lm)
+      slope_p_value = cross_sectional_lm_summary$coefficients[1,"Pr(>|t|)"] 
+      
+      if (slope_p_value <= 0.05){
+        number_of_significant_slopes = number_of_significant_slopes + 1
+      }
+
+    }
+    
+    # Save gammas for the whole period
+    if (line_number == 1){
+      whole_period_gammas = xts(x = gammas, order.by = german_stocks_data$Date)
+    }
+    
+    # Evaluate significance of the models
+    model_significance_df[line_number, "Percentage of significant slopes in cross sectional regressions (5% level)"] = number_of_significant_slopes * 100.0 / nrows
+
+    # Calculate descriptive statistics of Risk Premia
+    risk_premium_df[line_number, "Expected Risk Premium"] = mean(gammas)
+    risk_premium_df[line_number, "Expected Risk Premium Variance"] = var(gammas) / nrows
+    
+    # Calculate descriptive statistics of Pricing Errors
+    for (i in 1:number_of_stocks){
+      stock = stock_names[i]
+      single_stock_residuals = model_residuals[names(model_residuals) == stock]
+      df_index = (line_number - 1) * number_of_stocks + i
+      pricing_errors_df[df_index,"Expected Pricing Error"] = mean(single_stock_residuals)
+      pricing_errors_df[df_index,"Expected Pricing Error Variance"] = var(single_stock_residuals) / nrows
+    }
+  }
+  
+  # Create return list
+  result = list("risk_premium_df" = risk_premium_df,
+                "pricing_errors_df" = pricing_errors_df,
+                "model_significance_df" = model_significance_df,
+                "whole_period_betas" = whole_period_betas,
+                "whole_period_gammas" = whole_period_gammas)
+  
+  return(result)
+}
+
+main = function(){
+  
+  # Download data
+  data = download_data()
+  german_stocks_data = data$german_stocks_data
+  rf_data = data$rf_data
+  
+  # Calculate returns
+  german_stocks_data = calculate_returns(german_stocks_data)
+  
+  # Create a risk premium dataframe
+  risk_premium_df = data.frame(matrix(NA, nrow = 3, ncol = 4))
+  
+  colnames(risk_premium_df) = c("Period Start",
+                                "Period End",
+                                "Expected Risk Premium",
+                                "Expected Risk Premium Variance")
+  
+  risk_premium_df[, "Period Start"] = as.Date(c("1990-02-01", "1995-01-01", "2005-01-01"))
+  risk_premium_df[, "Period End"] = as.Date(c("2013-11-01", "2000-12-01", "2012-12-01"))
+  
+  # Create pricing errors dataframe
+  pricing_errors_df = data.frame(matrix(NA, nrow = 60, ncol = 5))
+  
+  colnames(pricing_errors_df) = c("Period Start",
+                                  "Period End",
+                                  "Stock",
+                                  "Expected Pricing Error",
+                                  "Expected Pricing Error Variance")
+  
+  stock_names = colnames(german_stocks_data)[2:21]
+  
+  pricing_errors_df[1:20, "Period Start"] = "1990-02-01"
+  pricing_errors_df[1:20, "Period End"] = "2013-11-01"
+  pricing_errors_df[1:20, "Stock"] = stock_names
+  
+  pricing_errors_df[21:40, "Period Start"] = "1995-01-01"
+  pricing_errors_df[21:40, "Period End"] = "2000-12-01"
+  pricing_errors_df[21:40, "Stock"] = stock_names
+  
+  pricing_errors_df[41:60, "Period Start"] = "2005-01-01"
+  pricing_errors_df[41:60, "Period End"] = "2012-12-01"
+  pricing_errors_df[41:60, "Stock"] = stock_names
+
+  # Create a model significance dataframe
+  model_significance_df = data.frame(matrix(NA, nrow = 3, ncol = 5))
+  
+  colnames(model_significance_df) = c("Period Start",
+                                      "Period End",
+                                      "Percentage of significant intercepts in time series regressions (5% level)",
+                                      "Percentage of significant slopes in time series regressions (5% level)",
+                                      "Percentage of significant slopes in cross sectional regressions (5% level)")
+  
+  model_significance_df[, "Period Start"] = as.Date(c("1990-02-01", "1995-01-01", "2005-01-01"))
+  model_significance_df[, "Period End"] = as.Date(c("2013-11-01", "2000-12-01", "2012-12-01"))
+  
+  # Calculate risk premium
+  result = calculate_risk_premium(risk_premium_df,
+                                  pricing_errors_df,
+                                  model_significance_df,
+                                  german_stocks_data,
+                                  rf_data)
+  
+  return(result)
+}
+
+# Run the program
+result = main()
+risk_premium_df = result$risk_premium_df
+model_significance_df = result$model_significance_df
+pricing_errors_df = result$pricing_errors_df
+whole_period_betas = result$whole_period_betas
+whole_period_gammas = result$whole_period_gammas
+
+@
+
+\section*{Introduction and discussion of the econometric approach}
+
+Theories of asset pricing frequently use "risk factors" to explain asset returns. These factors can range from macroeconomic (for example, consumer inflation or the unemployment rate) to financial (firm size, etc). The Fama-MacBeth two-step regression is a practical way of testing how these factors describe portfolio or asset returns. The goal is to find the premium from exposure to these factors.\\
+In the first step, each portfolio's return is regressed against one or more factor time series to determine how exposed it is to each one (the "factor exposures"). In the second step, the cross-section of portfolio returns is regressed against the factor exposures, at each time step, to give a time series of risk premia coefficients for each factor. The insight of Fama-MacBeth is to then average these coefficients, once for each factor, to give the premium expected for a unit exposure to each risk factor over time. \\
+
+The main advantages of the Fama-MacBeth approach is that it can easily accommodate unbalanced panels. One uses returns on only those stocks which exist at time t , which could be different from those at another time period. Moreover, the distribution of the risk premium estimates does not depend on the number of stocks, which can vary over time.\\ 
+
+However, the use of estimated betas in the second pass introduces the classical errors-in-variables problem. The standard method for handling errors in variables problem is to group stocks into portfolios following Black, Jensen and Scholes (1972). Since each portfolio has a large number of individual stocks, portfolio betas are estimated with sufficient precision and this fact allows one to ignore the errors-in-variables problem as being of second order in importance. One, however, has to be careful to ensure that the portfolio formation method does not highlight or mask characteristics in the data that have valuable information about the validity of the asset pricing model under examination. Put in other words, one has to avoid data snooping biases.\\
+
+We will conduct our analysis on 20 german stocks starting with 1990 and ending in 2013 and use the DAX index as a benchmark for comparison. As a risk-free rate we take monthly yields of 10-year German government bonds (IRLTLT01DEM156N) from \url{https://fred.stlouisfed.org/series/IRLTLT01DEM156N}\\
+
+\section*{Step 1: Estimate the time series regression}
+
+$r_{it}-r_{ft}=\alpha _{i}+\beta _{i}\left( r_{Mt}-r_{ft}\right) +\varepsilon _{it}\\ \text{for i} =1,\ldots ,N=20$
+
+<<hide-par, echo=FALSE, warning = FALSE, message = FALSE,  fig.align='center'>>=
+# Plots
+barplot(whole_period_betas, names.arg = names(whole_period_betas),
+        main = "Equity Betas (Feb.1990 - Nov.2013)", las=2)
+@
+<<echo=TRUE >>=
+cbind(model_significance_df[1:3,][,c(1,2,3)])
+cbind(model_significance_df[1:3,][,c(1,2,4)])
+@
+
+
+As we can see, the CAPM assumptions hold since all the beta coefficients are significant, whereas the alphas do not significantly differ from 0 and most of them are insignificant on 5 percent level (except for several one is 3d period of estimation). Also the R squares are approximately around 0.5 (not present here) which indicates that the market is a reasonable factor for explaining the stocks risk premia.
+
+\section*{Step 2: Use the estimates $\widehat {\beta _{i}}$ now written as $\widehat {\beta _{it}}$ to run cross sectional regression for each period t for the whole time span as well as some intervals, e.g. [1995-2000] and [2005-2012]:}
+
+$
+\begin{aligned}r_{it}-r_{ft}=\gamma _{it} \widehat {\beta _{it}} + a_{it} \end{aligned}
+$
+
+
+The estimates $\widehat {\gamma _{t}}$ are the realized risk premia at a given date t and $\widehat {a _{it}}$ are the pricing errors.
+
+<< echo=FALSE, fig.align='center'>>=
+# Plots
+
+plot.xts(whole_period_gammas, main = "Realized Risk Premia")
+
+@
+We now compute the percentage of significant slopes in cross sectional regressions. We do this on the following time subsets: 1995 - 2000, 2005 - 2012 and the whole period.
+
+<<echo=TRUE>>=
+cbind(model_significance_df[1:3,][,c(1,2,5)])
+@
+
+
+
+We can see that 60 - 71 percent of coefficients in cross-sectional regressions are significant on 5 percent level.
+
+\section*{Step 3 and 4: Derive the expected risk premia $\widehat {\gamma }$ and pricing errors $\widehat {a_{i}}$ as well as their variances. Follow the three steps and derive risk premia, pricing errors and their variances for the sub-periods stated above. Comment on statistical and economic characteristics of the empirical results.}
+
+
+Expected risk premia and pricing errors are given by the sample averages:
+
+\begin{eqnarray*}
+\hat\gamma = \frac{1}{T} \sum_{t=1}^{T}  \hat\gamma_t \qquad \quad \hat a_i=\frac{1}{T} \sum_{t=1}^{T} \hat a_{it}
+\end{eqnarray*}
+
+Variances are given by:
+
+\begin{eqnarray*}
+\sigma^2(\hat\gamma)= \frac{1}{T^2}\sum_{t=1}^{T}(\hat\gamma_t - \hat\gamma)^2  \qquad  \qquad 
+\sigma^2(\hat\alpha_i)= \frac{1}{T^2}\sum_{t=1}^{T} (\hat a_{it}-\hat a_i)^2
+\end{eqnarray*}
+
+\subsection*{Expected Risk Premium and Expected Risk Premium Variance}
+
+<<echo=TRUE>>=
+risk_premium_df
+@
+
+The expected risk premium is the average return that investors require over the risk-free rate for accepting the higher variability in returns. In our case the risk premium of the period 1995-2000 (0.012467368) is higher than of the period 2005-2012 (0.004763631). A possible reason for higher expected risk premium in the period of 1995-2000 is financial crisis in several Asian countries in 1997 and  Russian financial crisis in 1998 that raised fears of worldwide economic problems due to financial contagion. 
+
+\subsection*{Expected Pricing Error and Expected Pricing Error Variance for each individual stock in 1990-2013}
+
+<<echo=TRUE>>=
+pricing_errors_df[1:20,3:5]
+@
+\subsection*{Expected Pricing Error and Expected Pricing Error Variance for each individual stock in 1995-2000}
+<<echo=TRUE>>=
+pricing_errors_df[21:40,3:5]
+@
+\subsection*{Expected Pricing Error and Expected Pricing Error Variance for each individual stock in 2005-2012}
+<<echo=TRUE>>=
+pricing_errors_df[41:60,3:5]
+@
+
+As we can see, the firms which have the minimal expected pricing error, are different in different periods. In  1990-2013 it is Heidelberg Cement AG, one of the largest building materials companies in the world, in 1995-2000 it is RWE AG, electric utilities company, and in 2005-2012 it is Muenchener Rueck AG, one of the world's largest reinsurance companies. The company that has minimal expected pricing error variance also varies among the samples. In  1990-2013 it is BASF AG, the largest chemical producer in the world, in 1995-2000 it is Bayer AG, one of the world's largest pharmaceutical companies, and in 2005-2012 it is Linde AG, the world's largest industrial gas company by market share as well as revenue.
+
+However, when we look for the company which has the maximal expected pricing error, the results are more stable. In 1990-2013 as well as in 2005-2012 it is Commerzbank AG, one of the largest German banks, and in 1995-2000 it is Beiersdorf AG, producer of personal-care products and pressure-sensitive adhesives. There is even more stability regarding the company which has the maximal expected pricing error variance - in all the 3 samples it is K+S AG,  Europe's largest supplier of potash for use in fertilizer and the world's largest salt producer.
+
+\end{document}
